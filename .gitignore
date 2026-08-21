@@ -1,0 +1,6 @@
+bin/
+obj/
+dist/
+*.pfx
+*.p12
+*.b64
