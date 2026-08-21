@@ -1,0 +1,79 @@
+name: Build and VSign
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vsign-code-signing
+  cancel-in-progress: false
+
+jobs:
+  build-sign:
+    runs-on: windows-2022
+    environment: release-signing
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build Windows executable
+        shell: pwsh
+        run: |
+          dotnet publish src/VSignSmokeTest/VSignSmokeTest.csproj `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained false `
+            --output dist
+
+          if (!(Test-Path -LiteralPath "dist\VSignSmokeTest.exe")) {
+            throw "Build output not found"
+          }
+
+      - name: Sign Windows executable
+        id: vsign
+        uses: ./.github/actions/vsign-sign
+        with:
+          input-file: dist\VSignSmokeTest.exe
+          output-file: dist\VSignSmokeTest-signed.exe
+          server: ${{ vars.VSIGN_SERVER }}
+          signing-cert-sha1: ${{ vars.VSIGN_CERT_HASH }}
+          operator-cert-sha1: ${{ vars.VSIGN_OPERATOR_SHA1 }}
+          tool-release: ${{ vars.VSIGN_TOOL_RELEASE }}
+          tool-sha256: ${{ vars.VSIGN_TOOL_SHA256 }}
+          operator-pfx-base64: ${{ secrets.VSIGN_OPERATOR_PFX_B64 }}
+          operator-pfx-password: ${{ secrets.VSIGN_OPERATOR_PWD }}
+          key-pin: ${{ secrets.VSIGN_KEY_PIN }}
+          github-token: ${{ github.token }}
+
+      - name: Run signed test executable
+        shell: pwsh
+        run: |
+          & "dist\VSignSmokeTest-signed.exe"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Signed executable failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: VSignSmokeTest-windows-x64
+          path: |
+            dist/VSignSmokeTest-signed.exe
+            dist/VSignSmokeTest.dll
+            dist/VSignSmokeTest.runtimeconfig.json
+          if-no-files-found: error
+
