@@ -1,0 +1,221 @@
+name: VSign Authenticode sign
+description: Restore a VSign operator PFX, sign one Windows file, verify it, and remove temporary credentials
+
+inputs:
+  input-file:
+    description: Unsigned file, relative to the repository or an absolute path
+    required: true
+  output-file:
+    description: Signed output file, relative to the repository or an absolute path
+    required: true
+  server:
+    description: VSign server URL
+    required: true
+  signing-cert-sha1:
+    description: SHA1 thumbprint of the cloud code-signing certificate
+    required: true
+  operator-cert-sha1:
+    description: SHA1 thumbprint of the operator PFX certificate
+    required: true
+  tool-release:
+    description: Release tag containing ssigncode.exe in this repository
+    required: true
+  tool-sha256:
+    description: Expected SHA256 of ssigncode.exe
+    required: true
+  operator-pfx-base64:
+    description: Base64-encoded operator PFX
+    required: true
+  operator-pfx-password:
+    description: Operator PFX password
+    required: true
+  key-pin:
+    description: VSign key access PIN
+    required: true
+  github-token:
+    description: GitHub token used to download the private Release asset
+    required: true
+
+outputs:
+  signed-file:
+    description: Absolute path to the signed output file
+    value: ${{ steps.paths.outputs.signed-file }}
+  signer-thumbprint:
+    description: SHA1 thumbprint read from the final Authenticode signature
+    value: ${{ steps.verify.outputs.signer-thumbprint }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare paths
+      id: paths
+      shell: pwsh
+      env:
+        SOURCE_FILE: ${{ inputs.input-file }}
+        SIGNED_FILE: ${{ inputs.output-file }}
+      run: |
+        function Resolve-WorkspacePath([string]$Path) {
+          if ([IO.Path]::IsPathRooted($Path)) {
+            return [IO.Path]::GetFullPath($Path)
+          }
+          return [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE $Path))
+        }
+
+        $inputPath = Resolve-WorkspacePath $env:SOURCE_FILE
+        $outputPath = Resolve-WorkspacePath $env:SIGNED_FILE
+        $workDir = Join-Path $env:RUNNER_TEMP "vsign-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+
+        if (!(Test-Path -LiteralPath $inputPath -PathType Leaf)) {
+          throw "Unsigned input file not found: $inputPath"
+        }
+
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $outputPath) | Out-Null
+        New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+
+        "VSIGN_WORK_DIR=$workDir" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+        "VSIGN_INPUT_FILE=$inputPath" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+        "VSIGN_OUTPUT_FILE=$outputPath" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+        "signed-file=$outputPath" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+    - name: Download and verify VSign CLI
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        TOOL_RELEASE: ${{ inputs.tool-release }}
+        TOOL_SHA256: ${{ inputs.tool-sha256 }}
+      run: |
+        $binDir = Join-Path $env:VSIGN_WORK_DIR "bin"
+        New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+
+        gh release download $env:TOOL_RELEASE `
+          --repo $env:GITHUB_REPOSITORY `
+          --pattern "ssigncode.exe" `
+          --dir $binDir
+
+        $toolPath = Join-Path $binDir "ssigncode.exe"
+        if (!(Test-Path -LiteralPath $toolPath -PathType Leaf)) {
+          throw "ssigncode.exe was not downloaded"
+        }
+
+        $actualHash = (Get-FileHash -LiteralPath $toolPath -Algorithm SHA256).Hash
+        $expectedHash = $env:TOOL_SHA256.Replace(" ", "").Trim().ToUpperInvariant()
+        if ($actualHash -ne $expectedHash) {
+          throw "VSign CLI SHA256 mismatch. Expected $expectedHash, got $actualHash"
+        }
+
+        "VSIGN_EXE=$toolPath" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+        Write-Host "VSign CLI SHA256: $actualHash"
+        & $toolPath version
+
+    - name: Restore and verify operator PFX
+      shell: pwsh
+      env:
+        OPERATOR_PFX_BASE64: ${{ inputs.operator-pfx-base64 }}
+        OPERATOR_PFX_PASSWORD: ${{ inputs.operator-pfx-password }}
+        OPERATOR_CERT_SHA1: ${{ inputs.operator-cert-sha1 }}
+      run: |
+        if ([string]::IsNullOrWhiteSpace($env:OPERATOR_PFX_BASE64)) {
+          throw "The operator PFX Base64 secret is empty"
+        }
+
+        $operatorDir = Join-Path $env:VSIGN_WORK_DIR "operator"
+        $operatorFile = Join-Path $operatorDir "github-runner@ssigncode.pfx"
+        New-Item -ItemType Directory -Force -Path $operatorDir | Out-Null
+
+        try {
+          $pfxBytes = [Convert]::FromBase64String($env:OPERATOR_PFX_BASE64.Trim())
+          [IO.File]::WriteAllBytes($operatorFile, $pfxBytes)
+
+          $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+          $operatorCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $operatorFile,
+            $env:OPERATOR_PFX_PASSWORD,
+            $flags
+          )
+        }
+        catch {
+          throw "Cannot restore or decrypt the operator PFX: $($_.Exception.Message)"
+        }
+
+        try {
+          $actualSha1 = $operatorCert.Thumbprint.Replace(" ", "").ToUpperInvariant()
+          $expectedSha1 = $env:OPERATOR_CERT_SHA1.Replace(" ", "").ToUpperInvariant()
+          Write-Host "Operator subject: $($operatorCert.Subject)"
+          Write-Host "Operator SHA1: $actualSha1"
+          Write-Host "Operator expires: $($operatorCert.NotAfter.ToString('u'))"
+
+          if ($actualSha1 -ne $expectedSha1) {
+            throw "Operator certificate mismatch. Expected $expectedSha1, got $actualSha1"
+          }
+        }
+        finally {
+          $operatorCert.Dispose()
+        }
+
+        "SSIGNCODE_OPERATOR_STORE=file" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+        "SSIGNCODE_OPERATOR_DIR=$operatorDir" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+        "SSIGNCODE_OPERATOR_FILE=$operatorFile" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+    - name: Sign file with VSign
+      shell: pwsh
+      env:
+        VSIGN_SERVER: ${{ inputs.server }}
+        VSIGN_CERT_HASH: ${{ inputs.signing-cert-sha1 }}
+        SSIGNCODE_OPERATOR_PWD: ${{ inputs.operator-pfx-password }}
+        VSIGN_KEY_PIN: ${{ inputs.key-pin }}
+      run: |
+        & $env:VSIGN_EXE vsign `
+          -s $env:VSIGN_SERVER `
+          --cert_from csign `
+          -u github-runner `
+          --cert_hash $env:VSIGN_CERT_HASH `
+          -k $env:VSIGN_KEY_PIN `
+          --hash sha256 `
+          -i $env:VSIGN_INPUT_FILE `
+          -o $env:VSIGN_OUTPUT_FILE
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "VSign failed with exit code $LASTEXITCODE"
+        }
+        if (!(Test-Path -LiteralPath $env:VSIGN_OUTPUT_FILE -PathType Leaf)) {
+          throw "Signed output was not created: $env:VSIGN_OUTPUT_FILE"
+        }
+
+    - name: Verify final Authenticode signature
+      id: verify
+      shell: pwsh
+      env:
+        EXPECTED_SIGNING_CERT_SHA1: ${{ inputs.signing-cert-sha1 }}
+      run: |
+        $signature = Get-AuthenticodeSignature -LiteralPath $env:VSIGN_OUTPUT_FILE
+        if ($null -eq $signature.SignerCertificate) {
+          throw "No Authenticode signature found in $env:VSIGN_OUTPUT_FILE"
+        }
+
+        $actualSha1 = $signature.SignerCertificate.Thumbprint.Replace(" ", "").ToUpperInvariant()
+        $expectedSha1 = $env:EXPECTED_SIGNING_CERT_SHA1.Replace(" ", "").ToUpperInvariant()
+        if ($actualSha1 -ne $expectedSha1) {
+          throw "Signing certificate mismatch. Expected $expectedSha1, got $actualSha1"
+        }
+
+        Write-Host "Signature status: $($signature.Status)"
+        Write-Host "Signer: $($signature.SignerCertificate.Subject)"
+        Write-Host "Signing certificate SHA1: $actualSha1"
+        if ($null -ne $signature.TimeStamperCertificate) {
+          Write-Host "Timestamp signer: $($signature.TimeStamperCertificate.Subject)"
+        }
+        else {
+          Write-Warning "No timestamp certificate was reported"
+        }
+
+        "signer-thumbprint=$actualSha1" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+    - name: Remove temporary VSign credentials
+      if: always()
+      shell: pwsh
+      run: |
+        if (![string]::IsNullOrWhiteSpace($env:VSIGN_WORK_DIR) -and
+            (Test-Path -LiteralPath $env:VSIGN_WORK_DIR)) {
+          Remove-Item -LiteralPath $env:VSIGN_WORK_DIR -Recurse -Force
+        }
+
