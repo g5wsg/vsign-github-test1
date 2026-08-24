@@ -1,37 +1,35 @@
 name: Build TimeCommand Exe and Sign
 
 on:
-  workflow_dispatch:                # 允许手动触发
+  workflow_dispatch:
   push:
-    branches: [ main ]              # 推送 main 时自动触发（可选）
+    branches: [ main ]
 
 permissions:
-  contents: read                    # 最小权限，只读代码
+  contents: read
 
 concurrency:
-  group: vsign-code-signing         # 与原模板共用同一并发组，保护签名资源
+  group: vsign-code-signing
   cancel-in-progress: false
 
 jobs:
   build-sign:
     runs-on: windows-2022
-    environment: release-signing    # 必须指定，以便读取签名相关的 vars 和 secrets
+    environment: release-signing
     timeout-minutes: 30
 
     steps:
-      # 1. 检出代码（因为要引用本地 action: ./.github/actions/vsign-sign）
       - name: Check out source
         uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      # 2. 安装 .NET 8 SDK
       - name: Set up .NET 8
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 8.0.x
 
-      # 3. 动态生成 C# 源文件（显示当前时间）
+      # 生成源代码
       - name: Create source code
         shell: pwsh
         run: |
@@ -52,7 +50,7 @@ jobs:
           }
           "@ | Out-File -FilePath Program.cs -Encoding utf8
 
-      # 4. 创建 .csproj 项目文件
+      # 生成项目文件（已修正）
       - name: Create project file
         shell: pwsh
         run: |
@@ -64,11 +62,15 @@ jobs:
               <RuntimeIdentifier>win-x64</RuntimeIdentifier>
               <PublishSingleFile>true</PublishSingleFile>
               <SelfContained>false</SelfContained>
+              <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
             </PropertyGroup>
+            <ItemGroup>
+              <Compile Include="Program.cs" />
+            </ItemGroup>
           </Project>
           "@ | Out-File -FilePath TimeApp.csproj -Encoding utf8
 
-      # 5. 发布生成 .exe（输出到 dist 文件夹）
+      # 发布生成 exe
       - name: Build Windows executable
         shell: pwsh
         run: |
@@ -77,7 +79,7 @@ jobs:
             throw "Build output not found"
           }
 
-      # 6. 调用您已有的签名 Action 对 exe 进行数字签名
+      # 调用签名 Action
       - name: Sign Windows executable
         id: vsign
         uses: ./.github/actions/vsign-sign
@@ -94,11 +96,10 @@ jobs:
           key-pin: ${{ secrets.VSIGN_KEY_PIN }}
           github-token: ${{ github.token }}
 
-      # 7. 运行签名后的 exe，验证其功能（打印时间并等待按键，需模拟按键退出，以防挂起）
+      # 测试签名后的程序（自动跳过按键等待）
       - name: Run signed executable test
         shell: pwsh
         run: |
-          # 由于程序需要按键退出，我们用 Start-Process 启动并等待 2 秒后强制终止，只捕获输出
           $process = Start-Process -FilePath "dist\TimeApp-signed.exe" -PassThru -RedirectStandardOutput output.txt
           Start-Sleep -Seconds 2
           Stop-Process -Id $process.Id -Force
@@ -109,7 +110,7 @@ jobs:
             throw "Signed exe did not output expected time string"
           }
 
-      # 8. 上传签名后的 exe 作为制品
+      # 上传签名产物
       - name: Upload signed artifact
         uses: actions/upload-artifact@v7
         with:
