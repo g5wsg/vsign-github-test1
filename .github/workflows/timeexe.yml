@@ -29,7 +29,6 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      # 生成源代码
       - name: Create source code
         shell: pwsh
         run: |
@@ -50,7 +49,6 @@ jobs:
           }
           "@ | Out-File -FilePath Program.cs -Encoding utf8
 
-      # 生成项目文件（已修正）
       - name: Create project file
         shell: pwsh
         run: |
@@ -70,7 +68,6 @@ jobs:
           </Project>
           "@ | Out-File -FilePath TimeApp.csproj -Encoding utf8
 
-      # 发布生成 exe
       - name: Build Windows executable
         shell: pwsh
         run: |
@@ -79,7 +76,6 @@ jobs:
             throw "Build output not found"
           }
 
-      # 调用签名 Action
       - name: Sign Windows executable
         id: vsign
         uses: ./.github/actions/vsign-sign
@@ -96,21 +92,19 @@ jobs:
           key-pin: ${{ secrets.VSIGN_KEY_PIN }}
           github-token: ${{ github.token }}
 
-      # 测试签名后的程序（自动跳过按键等待）
       - name: Run signed executable test
         shell: pwsh
         run: |
           $process = Start-Process -FilePath "dist\TimeApp-signed.exe" -PassThru -RedirectStandardOutput output.txt
           Start-Sleep -Seconds 2
           Stop-Process -Id $process.Id -Force
-          $output = Get-Content output.txt
+          $output = Get-Content output.txt -Raw
           Write-Host "Signed exe output:"
           Write-Host $output
           if ($output -notmatch "Current system time:") {
             throw "Signed exe did not output expected time string"
           }
 
-      # 上传签名产物
       - name: Upload signed artifact
         uses: actions/upload-artifact@v7
         with:
