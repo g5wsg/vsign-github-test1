@@ -1,0 +1,41 @@
+name: Build Windows EXE (Self-Contained)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:   # 允许手动触发
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      # 虽然我们不需要仓库代码，但检出步骤可保留以备后续修改
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 配置 MSVC 编译环境（Windows 2022 自带 VS 2022 工具链）
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # 直接在工作流中创建 C++ 源文件（免去您仓库里写代码）
+      - name: Create source file
+        run: |
+          @"
+          #include <iostream>
+          int main() {
+              std::cout << "Hello from GitHub Actions on Windows 2022!" << std::endl;
+              return 0;
+          }
+          "@ | Out-File -FilePath hello.cpp -Encoding utf8
+
+      # 用 MSVC 编译成 .exe
+      - name: Compile
+        run: cl /EHsc /Fe:hello.exe hello.cpp
+
+      # 上传生成的 exe 文件，您可以在 Actions 页面下载
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hello-exe
+          path: hello.exe
